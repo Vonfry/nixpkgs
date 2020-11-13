@@ -1,0 +1,50 @@
+diff --git a/deps/openssl/CMakeLists.txt b/deps/openssl/CMakeLists.txt
+index d2d4144d..c6386172 100644
+--- a/deps/openssl/CMakeLists.txt
++++ b/deps/openssl/CMakeLists.txt
+@@ -122,9 +122,8 @@ set(OPENSSL_CONFIGURE_OPTIONS
+ 
+ ExternalProject_Add(openssl
+ 	PREFIX ${OPENSSL_PREFIX}
+-	URL ${OPENSSL_URL}
+-	URL_HASH SHA256=${OPENSSL_ARCHIVE_SHA256}
+-	DOWNLOAD_NAME ${OPENSSL_DOWNLOAD_NAME}
++    DOWNLOAD_COMMAND ""
++    SOURCE_DIR "${OPENSSL_LOCAL_DIR}"
+ 	CONFIGURE_COMMAND
+ 		${PERL_EXECUTABLE}
+ 		${OPENSSL_SRC_DIR}/Configure
+@@ -137,7 +136,6 @@ ExternalProject_Add(openssl
+ 		# Install only the software parts (libraries and includes), not
+ 		# e.g. documentation and manual pages.
+ 		${OPENSSL_MAKE} install_sw
+-	LOG_DOWNLOAD 1
+ 	LOG_BUILD 1
+ 	LOG_CONFIGURE 1
+ 	LOG_INSTALL 1
+diff --git a/support/CMakeLists.txt b/support/CMakeLists.txt
+index 4e6b9d48..70f7ef13 100644
+--- a/support/CMakeLists.txt
++++ b/support/CMakeLists.txt
+@@ -46,21 +46,6 @@ does not match the current version '\${YARAC_CURRENT_VERSION}' \
+ 	endif()
+ ")
+ 
+-# Get and install external support package from the retdec-support repository.
+-# This step may erase the entire target support directory, so it needs to go
+-# first.
+-#
+-install(CODE "
+-	execute_process(
+-		# -u = unbuffered -> print debug messages right away.
+-		COMMAND \"${PYTHON_EXECUTABLE}\" -u \"${CMAKE_SOURCE_DIR}/support/install-share.py\" \"${CMAKE_INSTALL_PREFIX}\" \"${SUPPORT_PKG_URL}\" \"${SUPPORT_PKG_SHA256}\" \"${SUPPORT_PKG_VERSION}\"
+-		RESULT_VARIABLE INSTALL_SHARE_RES
+-	)
+-	if(INSTALL_SHARE_RES)
+-		message(FATAL_ERROR \"RetDec share directory installation FAILED\")
+-	endif()
+-")
+-
+ # Write currently used yarac version to the support directory.
+ #
+ install(CODE "
