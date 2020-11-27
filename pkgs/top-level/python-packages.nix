@@ -4055,6 +4055,8 @@ in {
 
   netdisco = callPackage ../development/python-modules/netdisco { };
 
+  netEase-musicbox = callPackage ../development/python-modules/netease-musicbox { };
+
   netifaces = callPackage ../development/python-modules/netifaces { };
 
   networkx = if isPy3k then
