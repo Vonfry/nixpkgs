@@ -55,7 +55,7 @@ let
       cp "$(grep '^Exec=/nix/store/.*$' $session | cut -c 6-)" "$out/$stem"
     done
   '';
-  xsessions = make-x-scripts true "${dmcfg.sessionData.desktops}/share/xsessions";
+  xsessions = make-x-scripts "${dmcfg.sessionData.desktops}/share/xsessions";
   wayland-sessions = copy-scripts "${dmcfg.sessionData.desktops}/share/wayland-sessions";
 in
 {
