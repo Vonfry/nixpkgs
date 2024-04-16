@@ -1,4 +1,9 @@
 #! /usr/bin/env nix-shell
-#! nix-shell --show-trace ./emacs2nix.nix -i bash
+#! nix-shell --show-trace ./updater-emacs.nix -i bash
 
-exec elpa-packages.sh --names $EMACS2NIX/names.nix -o elpa-generated.nix
+SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
+
+exec emacs --fg-daemon=updater --quick -l $SCRIPT_DIR/update-elpa.el \
+    --eval '(run-updater "https://elpa.gnu.org/packages" "reciepes-archive-elpa.json")' \
+    --kill \
+    "$@"
