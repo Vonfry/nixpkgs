@@ -62,8 +62,7 @@ let
     if pkg != null then dontConfigure (externalSrc pkg pkgs.rtags)
     else null;
 
-  generateMelpa = lib.makeOverridable ({ archiveJson ? defaultArchive
-                                       }:
+  generateMelpa = lib.makeOverridable ({archiveJson ? defaultArchive}:
     let
       inherit (import ./libgenerated.nix lib self) melpaDerivation;
       super = (

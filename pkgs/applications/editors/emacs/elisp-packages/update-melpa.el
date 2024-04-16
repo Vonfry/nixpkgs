@@ -1,442 +1,385 @@
 ;;; update-melpa --- -*- lexical-binding: t -*-
 
+;;; Commentary:
 ;; This is the updater for recipes-archive-melpa.json
 
-(require 'promise)
-(require 'semaphore-promise)
-(require 'url)
+;;; Code:
+
+(require 'url-http)
 (require 'json)
 (require 'cl-lib)
 (require 'subr-x)
 (require 'seq)
 
-;; # Lib
-
-(defun alist-set (key value alist)
-  (cons
-   (cons key value)
-   (assq-delete-all
-    key alist)))
-
-(defun alist-update (key f alist)
-  (let ((value (alist-get key alist)))
-    (cons
-     (cons key (funcall f value))
-     (assq-delete-all
-      key alist))))
-
-
-(defun process-promise (semaphore program &rest args)
-  "Generate an asynchronous process and
-return Promise to resolve in that process."
-  (promise-then
-   (semaphore-promise-gated
-    semaphore
-    (lambda (resolve reject)
-      (funcall resolve (apply #'promise:make-process program args))))
-   #'car))
-
-(defun mangle-name (s)
-  (if (string-match "^[a-zA-Z].*" s)
-      s
-    (concat "_" s)))
-
-;; ## Shell promise + env
-
-(defun as-string (o)
-  (with-output-to-string (princ o)))
-
-(defun assocenv (env &rest namevals)
-  (let ((process-environment (copy-sequence env)))
-    (mapc (lambda (e)
-            (setenv (as-string (car e))
-                    (cadr e)))
-          (seq-partition namevals 2))
-    process-environment))
-
-(defun shell-promise (semaphore env script)
-  (semaphore-promise-gated
-   semaphore
-   (lambda (resolve reject)
-     (let ((process-environment env))
-       (funcall resolve (promise:make-shell-command script))))))
-
 ;; # Updater
 
+;; ## Structures
+
+(cl-defstruct fetch-info
+  "The infomation extracted from recipe and archive."
+  ename
+  fetcher
+  url
+  repo
+  stable-archive
+  stable-hash
+  unstable-archive
+  unstable-hash)
+
+(cl-defstruct prefetch-info
+  "The infomation for prefetching."
+  (info nil :type fetch-info)
+  variant)
+
+(cl-defstruct melpa-archive
+  "Melpa original recipes, archive and previous recipes in nix."
+  recipes
+  stable
+  unstable
+  previous)
+
 ;; ## Previous Archive Reader
-
-(defun previous-commit (index ename variant)
-  (when-let (pdesc (and index (gethash ename index)))
-    (when-let (desc (and pdesc (gethash variant pdesc)))
-      (gethash 'commit desc))))
-
-(defun previous-sha256 (index ename variant)
-  (when-let (pdesc (and index (gethash ename index)))
-    (when-let (desc (and pdesc (gethash variant pdesc)))
-      (gethash 'sha256 desc))))
-
 (defun parse-previous-archive (filename)
+  "Parse previous generated recipes in FILENAME by this script."
   (let ((idx (make-hash-table :test 'equal)))
     (cl-loop for desc in
           (let ((json-object-type 'hash-table)
                 (json-array-type 'list)
                 (json-key-type 'symbol))
-            (json-read-file filename))
+            (when (file-exists-p filename)
+              (json-read-file filename)))
           do (puthash (gethash 'ename desc)
                       desc idx))
     idx))
 
 ;; ## Prefetcher
 
-;; (defun latest-git-revision (url)
-;;   (process-promise "git" "ls-remote" url))
+(defvar *prefetch-max-concurrence* 64
+  "The max concurrence threads count for prefetch.
 
-(defun prefetch (semaphore fetcher repo commit)
-  (promise-then
-   (apply 'process-promise
-          semaphore
-          (pcase fetcher
-            ("github"    (list "nix-prefetch-url"
-                               "--unpack" (concat "https://github.com/" repo "/archive/" commit ".tar.gz")))
-            ("gitlab"    (list "nix-prefetch-url"
-                               "--unpack" (concat "https://gitlab.com/api/v4/projects/"
-                                                  (url-hexify-string repo)
-                                                  "/repository/archive.tar.gz?ref="
-                                                  commit)))
-            ("sourcehut" (list "nix-prefetch-url"
-                               "--unpack" (concat "https://git.sr.ht/~" repo "/archive/" commit ".tar.gz")))
-            ("codeberg" (list "nix-prefetch-url"
-                              "--unpack" (concat "https://codeberg.org/" repo "/archive/" commit ".tar.gz")))
-            ("bitbucket" (list "nix-prefetch-hg"
-                               (concat "https://bitbucket.com/" repo) commit))
-            ("hg"        (list "nix-prefetch-hg"
-                               repo commit))
-            ("git"       (list "nix-prefetch-git"
-                               "--fetch-submodules"
-                               "--url" repo
-                               "--rev" commit))
-            (_           (throw 'unknown-fetcher fetcher))))
-   (lambda (res)
-     (pcase fetcher
-       ("git" (alist-get 'sha256 (json-read-from-string res)))
-       (_ (car (split-string res)))))))
+This is to avoid opening file count restriction.")
 
-(defun source-sha (semaphore ename eprops aprops previous variant)
-  (let* ((fetcher (alist-get 'fetcher eprops))
-         (url     (alist-get 'url eprops))
-         (repo    (alist-get 'repo eprops))
-         (commit  (gethash 'commit aprops))
-         (prev-commit (previous-commit previous ename variant))
-         (prev-sha256 (previous-sha256 previous ename variant)))
-    (if (and commit prev-sha256
-             (equal prev-commit commit))
-        (progn
-          (message "INFO: %s: re-using %s %s" ename prev-commit prev-sha256)
-          (promise-resolve `((sha256 . ,prev-sha256))))
-      (if (and commit (or repo url))
-          (promise-then
-           (prefetch semaphore fetcher (or repo url) commit)
-           (lambda (sha256)
-             (message "INFO: %s: prefetched repository %s %s" ename commit sha256)
-             `((sha256 . ,sha256)))
-           (lambda (err)
-             (message "ERROR: %s: during prefetch %s" ename err)
-             (promise-resolve
-              `((error . ,err)))))
-        (progn
-          (message "ERROR: %s: no commit information" ename)
-          (promise-resolve
-           `((error . "No commit information"))))))))
+(defvar *prefetch-current-concurrence* 0
+  "The current concurrence threads count for prefetch.
 
-(defun source-info (recipe archive source-sha)
-  (let* ((esym    (car recipe))
-         (ename   (symbol-name esym))
-         (eprops  (cdr recipe))
-         (aentry  (gethash esym archive))
-         (version (and aentry (gethash 'ver aentry)))
+This is to avoid opening file count restriction with
+`*prefetch-max-concurrence*'.")
+
+(defun get-prefetch-cmd (fetcher repo commit)
+  "Get the prefetch command into a list.
+
+The first element is the program to run, and others are arguments.
+
+FETCHER is the type of source.
+REPO is the package name.
+COMMIT is the version of the REPO."
+  (pcase fetcher
+    ("github" (list "nix-prefetch-url"
+                    "--unpack"
+                    (concat "https://github.com/"
+                            repo
+                            "/archive/"
+                            commit
+                            ".tar.gz")))
+    ("gitlab" (list "nix-prefetch-url"
+                    "--unpack"
+                    (concat "https://gitlab.com/api/v4/projects/"
+                            (url-hexify-string repo)
+                            "/repository/archive.tar.gz?ref="
+                            commit)))
+    ("sourcehut" (list "nix-prefetch-url"
+                       "--unpack"
+                       (concat "https://git.sr.ht/~"
+                               repo
+                               "/archive/"
+                               commit
+                               ".tar.gz")))
+    ("codeberg" (list "nix-prefetch-url"
+                      "--unpack"
+                      (concat "https://codeberg.org/"
+                              repo
+                              "/archive/"
+                              commit
+                              ".tar.gz")))
+    ("bitbucket" (list "nix-prefetch-hg"
+                       (concat "https://bitbucket.com/" repo)
+                       commit))
+    ("hg" (list "nix-prefetch-hg"
+                repo
+                commit))
+    ("git" (list "nix-prefetch-git"
+                 "--fetch-submodules"
+                 "--url" repo
+                 "--rev" commit))
+    (_ (throw 'unknown-fetcher fetcher))))
+
+(defun to-sri (hash)
+  "Convert hexadeciamal HASH to SRI."
+  (with-temp-buffer
+    (call-process "nix-hash"
+                  nil
+                  t
+                  t
+                  "--to-sri"
+                  "--type"
+                  "sha256"
+                  hash)
+    (goto-char (point-min))
+    (buffer-substring (pos-bol) (pos-eol))))
+
+(defvar *prefetch-info* nil
+  "A dynamic binding var used in callback after prefetch.
+
+It should be `prefitch-info'")
+
+(cl-defmethod prefetch-info-archive ((info prefetch-info))
+  "Get the archive from INFO according to its variant."
+  (with-slots (info variant) info
+    (pcase variant
+      ('unstable (fetch-info-unstable-archive info))
+      ('stable (fetch-info-stable-archive info)))))
+
+(defun update-fetch-info-hash (var)
+  "Update the hash in `*prefetch-fetch-info*' to VAR."
+  (when (prefetch-info-p *prefetch-info*)
+    (with-slots (info variant) *prefetch-info*
+      (pcase variant
+        ('unstable (setf (fetch-info-unstable-hash info) var))
+        ('stable (setf (fetch-info-stable-hash info) var)))
+      (with-slots (ename commit) info
+        (let* ((archive (prefetch-info-archive *prefetch-info*))
+               (commit (gethash 'commit (gethash 'props archive))))
+          (message "INFO: %s: update repository %s %s"
+                   ename commit var))))))
+
+(defun process-prefetch-output (proc output)
+  "Process the OUTPUT from prefetching PROC and save into fetch-info.
+
+The fetch-info should be saved in `*prefetch-info*' as buffer local."
+  (with-current-buffer (process-buffer proc)
+    (setf *prefetch-current-concurrence*
+          (- *prefetch-current-concurrence* 1))
+    (when (prefetch-info-p *prefetch-info*)
+      (with-slots (info) *prefetch-info*
+        (with-slots (fetcher) info
+          (update-fetch-info-hash
+           (pcase fetcher
+             ("git" (alist-get 'hash (json-parse-string output)))
+             (_ (to-sri (car (split-string output "\n")))))))))))
+
+(defun prefetch-async ()
+  "Prefetch REPO at COMMIT with FETCHER to get the hash.
+
+The fetch-info should be saved in `*prefetch-fetch-info*'."
+  (when (prefetch-info-p *prefetch-info*)
+    (with-slots (info) *prefetch-info*
+      (with-slots (fetcher repo) info
+        (let* ((archive (prefetch-info-archive *prefetch-info*))
+               (commit (gethash 'commit (gethash 'props archive)))
+               (cmd (get-prefetch-cmd fetcher repo commit))
+               (prog (car cmd)))
+      (while (>= *prefetch-current-concurrence* *prefetch-max-concurrence*)
+        ; restrict max concurrence count to avoid reaching max opening file
+        ; count in linux.
+        (sleep-for 5))
+      (with-current-buffer (generate-new-buffer (concat "*" prog "*"))
+        (make-local-variable '*prefetch-info*)
+        (setf *prefetch-current-concurrence*
+              (+ 1 *prefetch-current-concurrence*))
+        (make-process
+         :name prog
+         :buffer (current-buffer)
+         :filter #'process-prefetch-output
+         :stderr (messages-buffer)
+         :noquery t
+         :connection-type nil
+         :command cmd)))))))
+
+(defun source-hash-async (previous)
+  "Get the hash according to packages infomation.
+
+The fetch-info should be saved in `*prefetch-info*'.
+
+PREVIOUS: previous generated recipes data."
+  (when (prefetch-info-p *prefetch-info*)
+    (with-slots (info) *prefetch-info*
+      (with-slots (ename repo url) info
+        (let* ((archive (prefetch-info-archive *prefetch-info*))
+               (commit (gethash 'commit (gethash 'props archive)))
+               (prev-commit (when previous (gethash 'commit previous)))
+               (prev-hash (when previous (gethash 'hash previous))))
+          (cond ((and commit prev-hash (equal prev-commit commit))
+                 (message "INFO: %s: re-using %s %s"
+                          ename prev-commit prev-hash)
+                 (update-fetch-info-hash prev-hash))
+                ((and commit (or repo url))
+                 (prefetch-async))
+                (t (message "ERROR: %s: no commit information" ename)
+                   (update-fetch-info-hash 'missing))))))))
+
+
+(defun source-info (aentry source-hash)
+  "Generate the source infomation.
+
+AENTRY: The stable or unstable content of the recipe.
+SOURCE-HASH: The hash of source."
+  (let* ((version (and aentry (gethash 'ver aentry)))
          (deps    (when-let (deps (gethash 'deps aentry))
                     (remove 'emacs (hash-table-keys deps))))
          (aprops  (and aentry (gethash 'props aentry)))
          (commit  (gethash 'commit aprops)))
-    (append `((version . ,version))
+    (append `((version . ,(string-replace
+                           ".-" "-"
+                           (mapconcat #'prin1-to-string version ".")))
+              (commit . ,commit)
+              (hash . ,source-hash))
             (when (< 0 (length deps))
-              `((deps . ,(sort deps 'string<))))
-            `((commit . ,commit))
-            source-sha)))
+              `((deps . ,(sort deps 'string<)))))))
 
-(defun recipe-info (recipe-index ename)
-  (if-let (desc (gethash ename recipe-index))
-      (cl-destructuring-bind (rcp-commit . rcp-sha256) desc
-        `((commit . ,rcp-commit)
-          (sha256 . ,rcp-sha256)))
-    `((error . "No recipe info"))))
+(cl-defmethod make-recipe-nix ((info fetch-info))
+  "Make a final recipe data used in nix from INFO."
+  (with-slots (ename fetcher url repo stable-archive stable-hash
+                     unstable-archive unstable-hash)
+      info
+    (append `((ename . ,ename)
+              (fetcher . ,fetcher)
+              ,(if (member fetcher '("github"
+                                     "bitbucket"
+                                     "gitlab"
+                                     "sourcehut"
+                                     "codeberg"))
+                   `(repo . ,repo)
+                 `(url . ,url)))
+            (unless (equal unstable-hash 'missing)
+              `((unstable . ,(source-info unstable-archive
+                                          unstable-hash))))
+            (unless (equal stable-hash 'missing)
+              `((stable . ,(source-info stable-archive
+                                        (pcase stable-hash
+                                          ('unstable unstable-hash)
+                                          (_ stable-hash)))))))))
 
-(defun start-fetch (semaphore recipe-index-promise recipes unstable-archive stable-archive previous)
-  (promise-all
-   (mapcar (lambda (entry)
-             (let* ((esym    (car entry))
-                    (ename   (symbol-name esym))
-                    (eprops  (cdr entry))
-                    (fetcher (alist-get 'fetcher eprops))
-                    (url     (alist-get 'url eprops))
-                    (repo    (alist-get 'repo eprops))
+(cl-defmethod start-fetch ((archives melpa-archive))
+  "Start fetch all ARCHIVES and MELPA-ARCHIVE information such as hash."
+  (let (recipes-info recipes-nix)
+    (setf recipes-info
+          (maphash
+           (lambda (esym eprops)
+             (let* ((ename   (symbol-name esym))
+                    (fetcher (gethash 'fetcher eprops))
+                    (url     (gethash 'url eprops))
+                    (repo    (gethash 'repo eprops))
 
-                    (unstable-aentry  (gethash esym unstable-archive))
-                    (unstable-aprops  (and unstable-aentry (gethash 'props unstable-aentry)))
-                    (unstable-commit  (and unstable-aprops (gethash 'commit unstable-aprops)))
+                    (unstable-aentry (gethash esym
+                                       (melpa-archive-unstable archives)))
+                    (unstable-aprops  (and unstable-aentry
+                                           (gethash 'props unstable-aentry)))
+                    (unstable-commit  (and unstable-aprops
+                                           (gethash 'commit unstable-aprops)))
 
-                    (stable-aentry (gethash esym stable-archive))
-                    (stable-aprops (and stable-aentry (gethash 'props stable-aentry)))
-                    (stable-commit  (and stable-aprops (gethash 'commit stable-aprops)))
+                    (stable-aentry (gethash esym
+                                            (melpa-archive-stable archives)))
+                    (stable-aprops (and stable-aentry
+                                        (gethash 'props stable-aentry)))
+                    (stable-commit  (and stable-aprops
+                                         (gethash 'commit stable-aprops)))
 
-                    (unstable-shap (if unstable-aprops
-                                       (source-sha semaphore ename eprops unstable-aprops previous 'unstable)
-                                     (promise-resolve nil)))
-                    (stable-shap (if (equal unstable-commit stable-commit)
-                                     unstable-shap
-                                   (if stable-aprops
-                                       (source-sha semaphore ename eprops stable-aprops previous 'stable)
-                                     (promise-resolve nil)))))
+                    (previous (when-let ((previous (melpa-archive-previous
+                                                    archives)))
+                                (gethash esym previous)))
+                    info)
+               (setf info (make-fetch-info
+                           :ename ename
+                           :fetcher fetcher
+                           :url url
+                           :repo repo
+                           :stable-archive stable-aentry
+                           :unstable-archive unstable-aentry))
 
-               (promise-then
-                (promise-all (list recipe-index-promise unstable-shap stable-shap))
-                (lambda (res)
-                  (seq-let [recipe-index unstable-sha stable-sha] res
-                    (append `((ename   . ,ename))
-                            (if-let (desc (gethash ename recipe-index))
-                                (cl-destructuring-bind (rcp-commit . rcp-sha256) desc
-                                  (append `((commit . ,rcp-commit)
-                                            (sha256 . ,rcp-sha256))
-                                          (when (not unstable-aprops)
-                                            (message "ERROR: %s: not in archive" ename)
-                                            `((error . "Not in archive")))))
-                              `((error . "No recipe info")))
-                            `((fetcher . ,fetcher))
-                            (if (or (equal "github" fetcher)
-                                    (equal "bitbucket" fetcher)
-                                    (equal "gitlab" fetcher)
-                                    (equal "sourcehut" fetcher)
-                                    (equal "codeberg" fetcher))
-                                `((repo . ,repo))
-                              `((url . ,url)))
-                            (when unstable-aprops `((unstable . ,(source-info entry unstable-archive unstable-sha))))
-                            (when stable-aprops `((stable . ,(source-info entry stable-archive stable-sha))))))))))
-           recipes)))
+               (when unstable-aprops
+                 (let ((*prefetch-info* (make-prefetch-info
+                                         :info info
+                                         :variant 'unstable)))
+                   (source-hash-async (when previous
+                                        (gethash 'unstable previous)))))
+
+               (if (equal unstable-commit stable-commit)
+                   (setf (fetch-info-stable-hash info) 'unstable)
+                 (let ((*prefetch-info* (make-prefetch-info
+                                         :info info
+                                         :variant 'stable)))
+                   (source-hash-async (when previous
+                                        (gethash 'stable previous)))))
+               info))
+           (melpa-archive-recipes archives)))
+
+    (while-let ((info (pop recipes-info)))
+      (with-slots (stable-hash unstable-hash) info
+        (if (and stable-hash unstable-hash)
+            (push (make-recipe-nix info) recipes-nix)
+          (progn
+            (sleep-for 1)
+            (push info (cdr (last recipes-info)))))))
+
+    recipes-nix))
 
 ;; ## Emitter
 
-(defun emit-json (prefetch-semaphore recipe-index-promise recipes archive stable-archive previous)
-  (promise-then
-   (start-fetch
-    prefetch-semaphore
-    recipe-index-promise
-    (sort recipes (lambda (a b)
-                    (string-lessp
-                     (symbol-name (car a))
-                     (symbol-name (car b)))))
-    archive stable-archive
-    previous)
-   (lambda (descriptors)
-     (message "Finished downloading %d descriptors" (length descriptors))
-     (let ((buf (generate-new-buffer "*recipes-archive*")))
-       (with-current-buffer buf
-         ;; (switch-to-buffer buf)
-         ;; (json-mode)
-         (insert
-          (let ((json-encoding-pretty-print t)
-                (json-encoding-default-indentation " "))
-            (json-encode descriptors)))
-         buf)))))
+(cl-defmethod emit-json ((archives melpa-archive))
+  "Generate the recipes for nix in json with ARCHIVES from melpa."
+  (when-let (descriptors (start-fetch archives))
+    (message "Finished downloading %d descriptors" (length descriptors))
+    (let ((buf (generate-new-buffer "*recipes-archive*")))
+      (with-current-buffer buf
+        (insert (json-encode descriptors))
+        buf))))
 
-;; ## Recipe indexer
-
-(defun http-get (url parser)
-  (promise-new
-   (lambda (resolve reject)
-     (url-retrieve
-      url (lambda (status)
-            (funcall resolve (condition-case err
-                                 (progn
-                                   (url-http-parse-headers)
-                                   (goto-char url-http-end-of-headers)
-                                   (message (buffer-substring (point-min) (point)))
-                                   (funcall parser))
-                               (funcall reject err))))))))
-
-(defun json-read-buffer (buffer)
-  (with-current-buffer buffer
-    (save-excursion
-      (mark-whole-buffer)
-      (json-read))))
-
-(defun error-count (recipes-archive)
-  (length
-   (seq-filter
-    (lambda (desc)
-      (alist-get 'error desc))
-    recipes-archive)))
-
-;; (error-count (json-read-buffer "recipes-archive-melpa.json"))
-
-(defun latest-recipe-commit (semaphore repo base-rev recipe)
-  (shell-promise
-   semaphore (assocenv process-environment
-                       "GIT_DIR" repo
-                       "BASE_REV" base-rev
-                       "RECIPE" recipe)
-   "exec git log --first-parent -n1 --pretty=format:%H $BASE_REV -- recipes/$RECIPE"))
-
-(defun latest-recipe-sha256 (semaphore repo base-rev recipe)
-  (promise-then
-   (shell-promise
-    semaphore (assocenv process-environment
-                        "GIT_DIR" repo
-                        "BASE_REV" base-rev
-                        "RECIPE" recipe)
-    "exec nix-hash --flat --type sha256 --base32 <(
-       git cat-file blob $(
-         git ls-tree $BASE_REV recipes/$RECIPE | cut -f1 | cut -d' ' -f3
-       )
-     )")
-   (lambda (res)
-     (car
-      (split-string res)))))
-
-(defun index-recipe-commits (semaphore repo base-rev recipes)
-  (promise-then
-   (promise-all
-    (mapcar (lambda (recipe)
-              (promise-then
-               (latest-recipe-commit semaphore repo base-rev recipe)
-               (let ((sha256p (latest-recipe-sha256 semaphore repo base-rev recipe)))
-                 (lambda (commit)
-                   (promise-then sha256p
-                                 (lambda (sha256)
-                                   (message "Indexed Recipe %s %s %s" recipe commit sha256)
-                                   (cons recipe (cons commit sha256))))))))
-            recipes))
-   (lambda (rcp-commits)
-     (let ((idx (make-hash-table :test 'equal)))
-       (mapc (lambda (rcpc)
-               (puthash (car rcpc) (cdr rcpc) idx))
-             rcp-commits)
-       idx))))
-
-(defun with-melpa-checkout (resolve)
-  (let ((tmpdir (make-temp-file "melpa-" t)))
-    (promise-finally
-     (promise-then
-      (shell-promise
-       (semaphore-create 1 "dummy")
-       (assocenv process-environment "MELPA_DIR" tmpdir)
-       "cd $MELPA_DIR
-       (git init --bare
-        git remote add origin https://github.com/melpa/melpa.git
-        git fetch origin) 1>&2
-       echo -n $MELPA_DIR")
-      (lambda (dir)
-        (message "Created melpa checkout %s" dir)
-        (funcall resolve dir)))
-     (lambda ()
-       (delete-directory tmpdir t)
-       (message "Deleted melpa checkout %s" tmpdir)))))
-
-(defun list-recipes (repo base-rev)
-  (promise-then
-   (shell-promise nil (assocenv process-environment
-                                "GIT_DIR" repo
-                                "BASE_REV" base-rev)
-                  "git ls-tree --name-only $BASE_REV recipes/")
-   (lambda (s)
-     (mapcar (lambda (n)
-               (substring n 8))
-             (split-string s)))))
+(defun get-melpa-json-async (url key archives)
+  "Get melpa json data at URL and save it into ARCHIVES at slot named KEY."
+  (url-retrieve
+   url
+   (lambda (status)
+     (if-let (err (plist-get status :error))
+         (message "Error: failed to get %s due to %s." url err)
+       (progn
+         (url-http-parse-headers)
+         (goto-char url-http-end-of-headers)
+         (message (buffer-substring (point-min) (point)))
+         (let ((json-object-type 'hash-table)
+               (json-array-type 'list)
+               (json-key-type 'symbol))
+           (setf (cl-struct-slot-value 'melpa-archive
+                                       key
+                                       archives)
+                 (json-read))))))))
 
 ;; ## Main runner
 
-(defvar recipe-indexp)
-(defvar archivep)
-
 (defun run-updater ()
+  "Run melpa updater to generate a recipe file in json read by nix."
   (message "Turning off logging to *Message* buffer")
-  (setq message-log-max nil)
-  (setenv "GIT_ASKPASS")
-  (setenv "SSH_ASKPASS")
-  (setq process-adaptive-read-buffering nil)
+  (let ((message-log-max nil)
+        (process-adaptive-read-buffering nil)
+        (archives (make-melpa-archive))
+        (output-file "recipes-archive-melpa.json")
+        recipes-nix-buf)
+    (dolist (url '((recipes . "https://melpa.org/recipes.json")
+                   (unstable . "https://melpa.org/archive.json")
+                   (stable . "https://stable.melpa.org/archive.json")))
+      (get-melpa-json-async (cdr url) (car url) archives))
+    (setf (melpa-archive-previous archives)
+          (parse-previous-archive output-file))
 
-  ;; Indexer and Prefetcher run in parallel
+    (while (or (melpa-archive-recipes archives)
+               (melpa-archive-stable archives)
+               (melpa-archive-unstable archives))
+      (sleep-for 1))
 
-  ;; Recipe Indexer
-  (setq recipe-indexp
-        (with-melpa-checkout
-         (lambda (repo)
-           (promise-then
-            (promise-then
-             (list-recipes repo "origin/master")
-             (lambda (recipe-names)
-               (promise:make-thread #'index-recipe-commits
-                                    ;; The indexer runs on a local git repository,
-                                    ;; so it is CPU bound.
-                                    ;; Adjust for core count + 2
-                                    (semaphore-create 6 "local-indexer")
-                                    repo "origin/master"
-                                    ;; (seq-take recipe-names 20)
-                                    recipe-names)))
-            (lambda (res)
-              (message "Indexed Recipes: %d" (hash-table-count res))
-              (defvar recipe-index res)
-              res)
-            (lambda (err)
-              (message "ERROR: %s" err))))))
+    (setf recipes-nix-buf (emit-json archives))
 
-  ;; Prefetcher + Emitter
-  (setq archivep
-        (promise-then
-         (promise-then (promise-all
-                        (list (http-get "https://melpa.org/recipes.json"
-                                        (lambda ()
-                                          (let ((json-object-type 'alist)
-                                                (json-array-type 'list)
-                                                (json-key-type 'symbol))
-                                            (json-read))))
-                              (http-get "https://melpa.org/archive.json"
-                                        (lambda ()
-                                          (let ((json-object-type 'hash-table)
-                                                (json-array-type 'list)
-                                                (json-key-type 'symbol))
-                                            (json-read))))
-                              (http-get "https://stable.melpa.org/archive.json"
-                                        (lambda ()
-                                          (let ((json-object-type 'hash-table)
-                                                (json-array-type 'list)
-                                                (json-key-type 'symbol))
-                                            (json-read))))))
-                       (lambda (resolved)
-                         (message "Finished download")
-                         (seq-let [recipes-content archive-content stable-archive-content] resolved
-                           ;; The prefetcher is network bound, so 64 seems a good estimate
-                           ;; for parallel network connections
-                           (promise:make-thread #'emit-json (semaphore-create 64 "prefetch-pool")
-                                                recipe-indexp
-                                                recipes-content
-                                                archive-content
-                                                stable-archive-content
-                                                (parse-previous-archive "recipes-archive-melpa.json")))))
-         (lambda (buf)
-           (with-current-buffer buf
-             (write-file "recipes-archive-melpa.json")))
-         (lambda (err)
-           (message "ERROR: %s" err))))
+    (with-current-buffer recipes-nix-buf
+      (write-file output-file))))
 
-  ;; Shutdown routine
-  (make-thread
-   (lambda ()
-     (promise-finally archivep
-                      (lambda ()
-                        ;; (message "Joining threads %s" (all-threads))
-                        ;; (mapc (lambda (thr)
-                        ;;         (when (not (eq thr (current-thread)))
-                        ;;           (thread-join thr)))
-                        ;;       (all-threads))
+(provide 'update-melpa)
 
-                        (kill-emacs 0))))))
+;;; update-melpa.el ends here

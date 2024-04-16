@@ -1,11 +1,10 @@
 let
   pkgs = import ../../../../.. {};
 
-  emacsEnv = pkgs.emacs.pkgs.withPackages (epkgs: with epkgs; [ async ]);
+  emacsEnv = pkgs.emacs;
 
 in pkgs.mkShell {
   packages = [
-    pkgs.git
     pkgs.nix
     pkgs.bash
     pkgs.nix-prefetch-git
