@@ -1,4 +1,4 @@
-;; -*- lexical-binding: t -*-
+;;; update-melpa --- -*- lexical-binding: t -*-
 
 ;; This is the updater for recipes-archive-melpa.json
 

@@ -29,10 +29,10 @@ test_packageset(){
     nix-instantiate --show-trace ../../../../../ -A "emacs.pkgs.$PKGSET"
 }
 
-download_change "elpa/elpa-generated.nix"
-download_change "elpa/elpa-devel-generated.nix"
+download_change "elpa/recipes-archive-elpa.json"
+download_change "elpa/recipes-archive-elpa-devel.json"
 download_change "melpa/recipes-archive-melpa.json"
-download_change "nongnu/nongnu-generated.nix"
+download_change "nongnu/recipes-archive-nongnu.json"
 
 test_packageset "nongnuPackages"
 test_packageset "elpaPackages"
@@ -40,7 +40,7 @@ test_packageset "elpaDevelPackages"
 test_packageset "melpaStablePackages"
 test_packageset "melpaPackages"
 
-commit_change "elpa-packages" "elpa-generated.nix"
-commit_change "elpa-devel-packages" "elpa-devel-generated.nix"
-commit_change "melpa-packages" "recipes-archive-melpa.json"
-commit_change "nongnu-packages" "nongnu-generated.nix"
+commit_change "elpa-packages" "elpa/recipes-archive-elpa.json"
+commit_change "elpa-devel-packages" "elpa/recipes-archive-elpa-devel.json"
+commit_change "melpa-packages" "melpa/recipes-archive-melpa.json"
+commit_change "nongnu-packages" "nongnu/recipes-archive-nongnu.json"
