@@ -60,6 +60,29 @@ let
     };
 
 in {
+  elpaDerivation = { ename, version, url, hash, deps, homepage, description, ...
+                   }:
+  let
+    broken = hash == null;
+    reqs = if deps then deps else [];
+    pname = ename;
+  in
+    self.callPackage ({ fetchelpa, elpaBuild, ... }@pkgargs:
+      elpaBuild {
+        inherit ename pname version;
+
+        src = if broken then null else fetchelpa {
+          inherit url hash;
+        };
+
+        packageRequires = map (dep: pkgargs.${dep} or self.${dep} or null) reqs;
+
+        meta = {
+          inherit homepage broken description;
+          license = lib.licenses.free;
+        };
+      }
+    ) {};
 
   melpaDerivation = variant:
     { ename, fetcher, recipe ? null, ... }@args:
