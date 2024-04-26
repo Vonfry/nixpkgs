@@ -8,7 +8,7 @@ To update the list of packages from ELPA,
 2. Check for evaluation errors:
      # "../../../../../" points to the default.nix from root of Nixpkgs tree
      env NIXPKGS_ALLOW_BROKEN=1 nix-instantiate ../../../../../ -A emacs.pkgs.elpaPackages
-3. Run `git commit -m "elpa-packages $(date -Idate)" -- elpa-generated.nix`
+3. Run `git commit -m "elpa-packages $(date -Idate)" -- reciepes-archive-elpa.json`
 
 ## Update from overlay
 
@@ -32,25 +32,24 @@ self: let
     });
   };
 
+  # Use custom elpa url fetcher with fallback/uncompress
+  fetchElpa = self.buildPackages.callPackage ./fetchelpa.nix { };
+
   elpaBuild = import ../build-support/elpa.nix {
     inherit lib stdenv texinfo writeText gcc;
     inherit (self) emacs;
   };
 
-  # Use custom elpa url fetcher with fallback/uncompress
-  fetchurl = buildPackages.callPackage ./fetchelpa.nix { };
-
   generateElpa = lib.makeOverridable ({
-    generated ? ./elpa-generated.nix
+    archiveJson ? ./recipes-archive-elpa.json
   }: let
 
-    imported = import generated {
-      callPackage = pkgs: args: self.callPackage pkgs (args // {
-        inherit fetchurl;
-      });
-    };
+    inherit (import ./libgenerated.nix lib self) elpaDerivation;
 
-    super = removeAttrs imported [ "dash" ];
+    super = lib.listToAttrs (builtins.filter
+      (s: s != null)
+      (map elpaDerivation (lib.importJSON archiveJson))
+    );
 
     overrides = {
       # upstream issue: Wrong type argument: arrayp, nil
@@ -208,7 +207,7 @@ self: let
 
     elpaPackages = super // overrides;
 
-  in elpaPackages // { inherit elpaBuild; });
+  in elpaPackages // { inherit elpaBuild fetchElpa; });
 
 in
 generateElpa { }

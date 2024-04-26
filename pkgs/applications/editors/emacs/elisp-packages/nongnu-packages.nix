@@ -12,26 +12,33 @@ To update the list of packages from nongnu (ELPA),
 
 */
 
-{ lib, buildPackages }:
+{ lib, buildPackages, stdenv, texinfo, writeText, gcc }:
 
 self: let
 
+  # Use custom elpa url fetcher with fallback/uncompress
+  fetchElpa = self.buildPackages.callPackage ./fetchelpa.nix { };
+
+  elpaBuild = import ../../../../build-support/emacs/elpa.nix {
+    inherit lib stdenv texinfo writeText gcc;
+    inherit (self) emacs;
+  };
+
   generateNongnu = lib.makeOverridable ({
-    generated ? ./nongnu-generated.nix
+    archiveJson ? ./recipes-archive-nongnu.json
   }: let
 
-    imported = import generated {
-      callPackage = pkgs: args: self.callPackage pkgs (args // {
-        # Use custom elpa url fetcher with fallback/uncompress
-        fetchurl = buildPackages.callPackage ./fetchelpa.nix { };
-      });
-    };
+    inherit (import ./libgenerated.nix lib self) elpaDerivation;
 
-    super = imported;
+    super = lib.listToAttrs (builtins.filter
+      (s: s != null)
+      (map elpaDerivation (lib.importJSON archiveJson))
+    );
 
     overrides = {
     };
 
-  in super // overrides);
+    nongnuPackages = super // overrides;
+  in nongnuPackages // { inherit elpaBuild fetchElpa; });
 
 in generateNongnu { }

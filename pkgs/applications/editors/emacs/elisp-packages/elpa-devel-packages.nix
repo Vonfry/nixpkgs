@@ -38,19 +38,18 @@ self: let
   };
 
   # Use custom elpa url fetcher with fallback/uncompress
-  fetchurl = buildPackages.callPackage ./fetchelpa.nix { };
+  fetchElpa = buildPackages.callPackage ./fetchelpa.nix { };
 
   generateElpa = lib.makeOverridable ({
-    generated ? ./elpa-devel-generated.nix
+    archiveJson ? ./recipes-archive-elpa-devel.json
   }: let
 
-    imported = import generated {
-      callPackage = pkgs: args: self.callPackage pkgs (args // {
-        inherit fetchurl;
-      });
-    };
+    inherit (import ./libgenerated.nix lib self) elpaDerivation;
 
-    super = removeAttrs imported [ "dash" ];
+    super = lib.listToAttrs (builtins.filter
+      (s: s != null)
+      (map elpaDerivation (lib.importJSON archiveJson))
+    );
 
     overrides = {
       eglot = super.eglot.overrideAttrs (old: {
@@ -119,6 +118,6 @@ self: let
 
     elpaDevelPackages = super // overrides;
 
-  in elpaDevelPackages // { inherit elpaBuild; });
+  in elpaDevelPackages // { inherit elpaBuild fetchElpa; });
 
 in generateElpa { }

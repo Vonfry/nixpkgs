@@ -3,7 +3,7 @@
 
 SCRIPT_DIR="$( cd "$(dirname "$0")" ; pwd -P )"
 
-exec emacs --fg-daemon=updater --quick -l $SCRIPT_DIR/update-elpa.el \
-    --eval '(run-updater "https://elpa.nongnu.org/nongnu" "reciepes-archive-nongnu.json")' \
+exec emacs --batch --quick -l "$SCRIPT_DIR/update-elpa.el" \
+    -f "run-updater" "nongnu" "https://elpa.nongnu.org/nongnu/" "recipes-archive-nongnu.json" \
     --kill \
     "$@"

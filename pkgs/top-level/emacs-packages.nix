@@ -34,7 +34,7 @@ let
   };
 
   mkNongnuPackages = { pkgs, lib }: import ../applications/editors/emacs/elisp-packages/nongnu-packages.nix {
-    inherit (pkgs) buildPackages;
+    inherit (pkgs) stdenv texinfo writeText gcc buildPackages;
     inherit lib;
   };
 
