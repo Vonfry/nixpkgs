@@ -3523,14 +3523,8 @@ with pkgs;
 
   nyxt = callPackage ../applications/networking/browsers/nyxt {
     sbcl = sbcl_2_4_6;
-    inherit (gst_all_1)
-      gstreamer
-      gst-libav
-      gst-plugins-base
-      gst-plugins-good
-      gst-plugins-bad
-      gst-plugins-ugly
-      ;
+    nodejs = nodejs_20;
+    electron = electron_32;
   };
 
   nixnote2 = libsForQt5.callPackage ../applications/misc/nixnote2 { };
