@@ -2,98 +2,120 @@
   stdenv,
   lib,
   testers,
-  wrapGAppsHook3,
   fetchzip,
   sbcl,
   pkg-config,
   libfixposix,
-  gobject-introspection,
-  gsettings-desktop-schemas,
-  glib-networking,
-  gtk3,
-  glib,
-  gdk-pixbuf,
-  cairo,
-  pango,
-  webkitgtk_4_0,
   openssl,
-  gstreamer,
-  gst-libav,
-  gst-plugins-base,
-  gst-plugins-good,
-  gst-plugins-bad,
-  gst-plugins-ugly,
   xdg-utils,
   xclip,
   wl-clipboard,
   nix-update-script,
+  sqlite,
+  buildNpmPackage,
+  importNpmLock,
+  electron,
+  applyPatches,
+  makeWrapper,
+  nodejs,
 }:
 
-stdenv.mkDerivation (finalAttrs: {
-  pname = "nyxt";
-  version = "3.12.0";
-
+let
+  version = "4.0.0-pre-release-1";
   src = fetchzip {
-    url = "https://github.com/atlas-engineer/nyxt/releases/download/${finalAttrs.version}/nyxt-${finalAttrs.version}-source-with-submodules.tar.xz";
-    hash = "sha256-T5p3OaWp28rny81ggdE9iXffmuh6wt6XSuteTOT8FLI=";
+    url = "https://github.com/atlas-engineer/nyxt/releases/download/${version}/nyxt-${version}-source-with-submodules.tar.xz";
+    hash = "sha256-aCjR37QQ52m8YOGmM4J8C+bQR6JRJAl9y4lTx54iHS8=";
     stripRoot = false;
+
   };
 
-  nativeBuildInputs = [ wrapGAppsHook3 ];
+  srcPatched = applyPatches {
+    inherit src;
+    patches = [
+      ./electron-core.patch
+    ];
+  };
+
+  cl-electron-server-src = srcPatched + /_build/cl-electron;
+  cl-electron-server = buildNpmPackage {
+    pname = "cl-electron-server";
+    version = (builtins.fromJSON (builtins.readFile "${src}/_build/cl-electron/package.json")).version;
+    src = cl-electron-server-src;
+
+    inherit nodejs;
+
+    env.ELECTRON_SKIP_BINARY_DOWNLOAD = "1";
+
+    dontNpmBuild = true;
+
+    npmDeps = importNpmLock {
+      npmRoot = cl-electron-server-src;
+    };
+
+    npmConfigHook = importNpmLock.npmConfigHook;
+
+    meta = {
+      description = "Electron server for cl-electron.";
+      homepage = "https://github.com/atlas-engineer/cl-electron";
+      license = lib.licenses.bsd3;
+    };
+  };
+in stdenv.mkDerivation (finalAttrs: {
+  pname = "nyxt";
+
+  src = srcPatched;
+  inherit version;
+
+  nativeBuildInputs = [ makeWrapper ];
 
   buildInputs = [
     sbcl
     # for groveller
     pkg-config
     libfixposix
-    # for gappsWrapper
-    gobject-introspection
-    gsettings-desktop-schemas
-    glib-networking
-    gtk3
-    gstreamer
-    gst-libav
-    gst-plugins-base
-    gst-plugins-good
-    gst-plugins-bad
-    gst-plugins-ugly
+    cl-electron-server
   ];
+
+  postPatch = ''
+    substituteInPlace _build/cl-electron/source/core.lisp \
+      --subst-var-by "cl-electron-server" "${cl-electron-server}/lib/node_modules/cl-electron-server"
+  '';
 
   # for cffi
   LD_LIBRARY_PATH = lib.makeLibraryPath [
-    glib
-    gobject-introspection
-    gdk-pixbuf
-    cairo
-    pango
-    gtk3
-    webkitgtk_4_0
     openssl
     libfixposix
+    sqlite
   ];
 
   postConfigure = ''
-    export CL_SOURCE_REGISTRY="$(pwd)/_build//"
     export ASDF_OUTPUT_TRANSLATIONS="$(pwd):$(pwd)"
     export PREFIX="$out"
     export NYXT_VERSION="$version"
   '';
 
-  # don't refresh from git
   makeFlags = [
     "all"
-    "NYXT_SUBMODULES=false"
+    # build cl-electron in nix instead of npm.
+    "NODE_SETUP=false"
+    "NYXT_SUBMODULES=true"
+    "NYXT_RENDERER=electron"
   ];
 
-  preFixup = ''
-    gappsWrapperArgs+=(--prefix LD_LIBRARY_PATH : "$LD_LIBRARY_PATH")
-    gappsWrapperArgs+=(--prefix PATH : "${
+  NODE_PATH = cl-electron-server.npmDeps;
+
+  postFixup = ''
+    wrapProgram "$out/bin/nyxt" \
+      --prefix LD_LIBRARY_PATH : "${finalAttrs.LD_LIBRARY_PATH}" \
+      --prefix NODE_PATH : "${finalAttrs.NODE_PATH}" \
+      --prefix PATH : "${
       lib.makeBinPath [
         xdg-utils
         xclip
         wl-clipboard
+        electron
       ]
-    }")
+    }"
   '';
 
   # prevent corrupting core in exe
