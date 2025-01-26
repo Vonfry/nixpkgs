@@ -32,6 +32,7 @@ let
   srcPatched = applyPatches {
     inherit src;
     patches = [
+      ./electron-builder.patch
       ./electron-core.patch
     ];
   };
@@ -46,7 +47,16 @@ let
 
     env.ELECTRON_SKIP_BINARY_DOWNLOAD = "1";
 
-    dontNpmBuild = true;
+    buildPhase = ''
+      runHook preBuild
+
+      npm exec electron-builder -- \
+        --dir \
+        -c.electronDist="${electron.dist}" \
+        -c.electronVersion="${electron.version}"
+
+      runHook postBuild
+    '';
 
     npmDeps = importNpmLock {
       npmRoot = cl-electron-server-src;
