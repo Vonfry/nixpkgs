@@ -55,10 +55,6 @@ let
       tar xf ${electron.headers} -C electron-headers --strip-components=1
       export npm_config_nodedir="$(pwd)/electron-headers"
 
-      ### override the detected electron version
-      substituteInPlace node_modules/@electron-forge/core-utils/dist/electron-version.js \
-        --replace-fail "return version" "return '${electron.version}'"
-
       ### create the electron archive to be used by electron-packager
       cp -r ${electron.dist} electron-dist
       chmod -R u+w electron-dist
