@@ -47,15 +47,31 @@ let
 
     env.ELECTRON_SKIP_BINARY_DOWNLOAD = "1";
 
-    buildPhase = ''
-      runHook preBuild
+    preConfigure = ''
+      ### use our electron's headers as our nodedir so that electron-rebuild can rebuild for our electron's ABI
+      # note: because we're not specifying the `--version` flag to pass to electron-rebuild in forge.config.js,
+      # it thinks it's compiling for the ABI version chosen by upstream, but this doesn't seem to cause any issues
+      mkdir -p electron-headers
+      tar xf ${electron.headers} -C electron-headers --strip-components=1
+      export npm_config_nodedir="$(pwd)/electron-headers"
 
-      npm exec electron-builder -- \
-        --dir \
-        -c.electronDist="${electron.dist}" \
-        -c.electronVersion="${electron.version}"
+      ### override the detected electron version
+      substituteInPlace node_modules/@electron-forge/core-utils/dist/electron-version.js \
+        --replace-fail "return version" "return '${electron.version}'"
 
-      runHook postBuild
+      ### create the electron archive to be used by electron-packager
+      cp -r ${electron.dist} electron-dist
+      chmod -R u+w electron-dist
+
+      pushd electron-dist
+      zip -0Xqr ../electron.zip .
+      popd
+
+      rm -r electron-dist
+
+      # force @electron/packager to use our electron instead of downloading it
+      substituteInPlace node_modules/@electron/packager/src/index.js \
+        --replace-fail "await this.getElectronZipPath(downloadOpts)" "'$(pwd)/electron.zip'"
     '';
 
     npmDeps = importNpmLock {
