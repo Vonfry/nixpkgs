@@ -49,8 +49,6 @@ let
 
     preConfigure = ''
       ### use our electron's headers as our nodedir so that electron-rebuild can rebuild for our electron's ABI
-      # note: because we're not specifying the `--version` flag to pass to electron-rebuild in forge.config.js,
-      # it thinks it's compiling for the ABI version chosen by upstream, but this doesn't seem to cause any issues
       mkdir -p electron-headers
       tar xf ${electron.headers} -C electron-headers --strip-components=1
       export npm_config_nodedir="$(pwd)/electron-headers"
