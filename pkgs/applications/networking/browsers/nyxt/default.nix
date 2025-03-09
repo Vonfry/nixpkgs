@@ -18,6 +18,7 @@
   applyPatches,
   makeWrapper,
   nodejs,
+  runCommand,
 }:
 
 let
@@ -37,6 +38,12 @@ let
     ];
   };
 
+  # unpack tarball containing electron's headers
+  electron-headers = runCommand "electron-headers" { } ''
+    mkdir -p $out
+    tar -C $out --strip-components=1 -xvf ${electron.headers}
+  '';
+
   cl-electron-server-src = srcPatched + /_build/cl-electron;
   cl-electron-server = buildNpmPackage {
     pname = "cl-electron-server";
@@ -47,11 +54,18 @@ let
 
     env.ELECTRON_SKIP_BINARY_DOWNLOAD = "1";
 
+    # don't build native modules with node headers
+    npmFlags = [ "--ignore-scripts" ];
+
     preConfigure = ''
-      ### use our electron's headers as our nodedir so that electron-rebuild can rebuild for our electron's ABI
-      mkdir -p electron-headers
-      tar xf ${electron.headers} -C electron-headers --strip-components=1
-      export npm_config_nodedir="$(pwd)/electron-headers"
+      pushd $npmRoot
+
+      # use electron's headers to make node-gyp compile against the electron ABI
+      export npm_config_nodedir="${electron-headers}"
+
+      ### override the detected electron version
+      substituteInPlace node_modules/@electron-forge/core-utils/dist/electron-version.js \
+        --replace-fail "return version" "return '${electron.version}'"
 
       ### create the electron archive to be used by electron-packager
       cp -r ${electron.dist} electron-dist
@@ -66,6 +80,11 @@ let
       # force @electron/packager to use our electron instead of downloading it
       substituteInPlace node_modules/@electron/packager/src/index.js \
         --replace-fail "await this.getElectronZipPath(downloadOpts)" "'$(pwd)/electron.zip'"
+
+      # now that we patched everything, we still have to run the scripts we ignored with --ignore-scripts
+      npm rebuild
+
+      popd
     '';
 
     npmDeps = importNpmLock {
