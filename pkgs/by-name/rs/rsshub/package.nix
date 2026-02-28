@@ -2,49 +2,66 @@
   lib,
   fetchFromGitHub,
   makeBinaryWrapper,
+  nix-update-script,
   nodejs,
-  pnpm_9,
+  pnpm,
   fetchPnpmDeps,
   pnpmConfigHook,
   replaceVars,
   stdenv,
-  nix-update-script,
 }:
 stdenv.mkDerivation (finalAttrs: {
   pname = "rsshub";
-  version = "0-unstable-2025-11-28";
+  version = "0-unstable-2026-02-28";
 
   src = fetchFromGitHub {
     owner = "DIYgod";
     repo = "RSSHub";
-    rev = "b6dbafe33e0c3e3a4ba5a1edd2da29b70412389f";
-    hash = "sha256-FsevO2nb6leuuRmzCLIy093FCafl3Y/CsSp1ydJOnKY=";
+    rev = "1acb8057995a446574827b6e3e756de462e8f6be";
+    hash = "sha256-I89mEL93rktDZdeSCQp6N6JCp7k93jvKS74ALXz6GUs=";
   };
 
   patches = [
     (replaceVars ./0001-fix-git-hash.patch {
-      "GIT_HASH" = finalAttrs.src.rev;
+      GIT_HASH = finalAttrs.src.rev;
     })
-    ./0002-fix-network-call.patch
   ];
 
   pnpmDeps = fetchPnpmDeps {
     inherit (finalAttrs) pname version src;
-    pnpm = pnpm_9;
-    fetcherVersion = 1;
-    hash = "sha256-zTsJZnhX7xUOsKST6S3TQUV8M1Tewcs9fZgrDSf5ba8=";
+    fetcherVersion = 3;
+    hash = "sha256-/Rc8yb0To9rNs5XavFBjEImMk32/zFX03RHvI+Uj4gc=";
   };
 
   nativeBuildInputs = [
     makeBinaryWrapper
     nodejs
     pnpmConfigHook
-    pnpm_9
+    pnpm
   ];
+
+  # Patch lib/registry.ts to add a BUILD_ROUTES_MODE branch that uses
+  # directoryImport to collect route metadata without executing module-level
+  # code, which would fail in the network-isolated Nix sandbox.
+  # See: https://github.com/DIYgod/RSSHub/blob/master/flake.nix
+  postPatch = ''
+    substituteInPlace lib/registry.ts \
+      --replace-fail 'if (config.isPackage)' \
+                     'if (process.env.BUILD_ROUTES_MODE) {
+        modules = directoryImport({
+            targetDirectoryPath: path.join(__dirname, "./routes"),
+            importPattern: /\.tsx?$/,
+        }) as typeof modules;
+    } else if (config.isPackage)'
+  '';
 
   buildPhase = ''
     runHook preBuild
-    pnpm build
+    # First build route metadata using directoryImport (avoids executing
+    # module-level code that would trigger network requests)
+    BUILD_ROUTES_MODE=1 pnpm run build:routes
+    # Then build the application
+    pnpm run build
     runHook postBuild
   '';
 
@@ -58,11 +75,9 @@ stdenv.mkDerivation (finalAttrs: {
 
   preFixup = ''
     makeWrapper ${lib.getExe nodejs} $out/bin/rsshub \
-      --chdir "$out/lib/rsshub" \
       --set "NODE_ENV" "production" \
       --set "NO_LOGFILES" "true" \
-      --set "TSX_TSCONFIG_PATH" "$out/lib/rsshub/tsconfig.json" \
-      --append-flags "$out/lib/rsshub/dist/index.mjs"
+      --add-flags "$out/lib/rsshub/dist/index.mjs"
   '';
 
   passthru.updateScript = nix-update-script { extraArgs = [ "--version=branch=master" ]; };
@@ -78,7 +93,7 @@ stdenv.mkDerivation (finalAttrs: {
       new features and bug fixes.
     '';
     homepage = "https://docs.rsshub.app";
-    license = lib.licenses.mit;
+    license = lib.licenses.agpl3Only;
     maintainers = with lib.maintainers; [ xinyangli ];
     mainProgram = "rsshub";
     platforms = lib.platforms.all;
