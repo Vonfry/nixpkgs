@@ -9,6 +9,7 @@
   rclone,
   restic,
   writableTmpDirAsHomeHook,
+  nixosTests,
 }:
 
 let
@@ -157,6 +158,9 @@ stdenv.mkDerivation (finalAttrs: {
         "--subpackage"
         "node_modules"
       ];
+    };
+    tests = {
+      inherit (nixosTests) zerobyte;
     };
   };
 
